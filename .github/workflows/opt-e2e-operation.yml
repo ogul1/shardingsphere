@@ -1,0 +1,188 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+name: Modified E2E - Operation
+env:
+  MAVEN_OPTS: -Dhttp.keepAlive=false -Dmaven.wagon.http.pool=false -Dmaven.wagon.http.retryHandler.class=standard
+    -Dmaven.wagon.http.retryHandler.count=3 -Dspotless.apply.skip=true -Dfailsafe.skipAfterFailureCount=1
+    -Dio.netty.leakDetectionLevel=advanced
+jobs:
+  global-environment:
+    name: Import Global Environment
+    uses: ./.github/workflows/required-reusable.yml
+  detect-changed-files:
+    name: detect-changed-files
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+    - name: Setup Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: |-
+        python -m pip install --upgrade pip
+        pip install inotify
+    - name: Run inotifywait
+      run: |-
+        python3 -c "
+        import inotify.adapters
+        import inotify.constants
+        import os
+        from datetime import datetime, timezone
+        with open('/home/runner/inotifywait-log-detect-changed-files.csv', 'w') as log_file:
+          i = inotify.adapters.InotifyTree('/home/runner/work/shardingsphere/shardingsphere', inotify.constants.IN_CREATE | inotify.constants.IN_ACCESS)
+          for event in i.event_gen(yield_nones=False):
+            (_, type_names, path, filename) = event
+            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
+            events = ','.join(type_names)
+            log_file.write(f'{now};{path};{filename};{events}\n')
+            log_file.flush()
+            os.fsync(log_file.fileno())
+        " &
+    - uses: actions/checkout@v4
+    - run: touch optcd-3.txt
+    - uses: dorny/paths-filter@v3
+      id: filter
+      with:
+        token: ${{ github.token }}
+        filters: .github/workflows/resources/filter/operation-filters.yml
+    - run: touch optcd-4.txt
+    - name: Upload inotifywait logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: inotifywait-detect-changed-files
+        path: /home/runner/inotifywait-log-detect-changed-files.csv
+    outputs:
+      changed_operations: ${{ steps.filter.outputs.changes }}
+  e2e-operation:
+    name: e2e-operation (${{ matrix.operation }}, ${{ matrix.image }})
+    needs:
+    - detect-changed-files
+    - global-environment
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      max-parallel: 20
+      fail-fast: false
+      matrix:
+        operation:
+        - transaction
+        - pipeline
+        - showprocesslist
+        image:
+        - type: it.docker.mysql.version
+          version: mysql:5.7
+        - type: it.docker.postgresql.version
+          version: postgres:12-alpine
+        - type: it.docker.mariadb.version
+          version: mariadb:11
+        exclude:
+        - operation: transaction
+          image:
+            type: it.docker.mariadb.version
+            version: mariadb:11
+        - operation: showprocesslist
+          image:
+            type: it.docker.postgresql.version
+            version: postgres:12-alpine
+        - operation: showprocesslist
+          image:
+            type: it.docker.mariadb.version
+            version: mariadb:11
+    steps:
+    - name: Setup Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: |-
+        python -m pip install --upgrade pip
+        pip install inotify
+    - name: Run inotifywait
+      run: |-
+        python3 -c "
+        import inotify.adapters
+        import inotify.constants
+        import os
+        from datetime import datetime, timezone
+        with open('/home/runner/inotifywait-log-e2e-operation (${{ matrix.operation }}, ${{ matrix.image }}).csv', 'w') as log_file:
+          i = inotify.adapters.InotifyTree('/home/runner/work/shardingsphere/shardingsphere', inotify.constants.IN_CREATE | inotify.constants.IN_ACCESS)
+          for event in i.event_gen(yield_nones=False):
+            (_, type_names, path, filename) = event
+            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
+            events = ','.join(type_names)
+            log_file.write(f'{now};{path};{filename};{events}\n')
+            log_file.flush()
+            os.fsync(log_file.fileno())
+        " &
+    - env:
+        changed_operations: ${{ needs.detect-changed-files.outputs.changed_operations
+          }}
+        current_operation: ${{ matrix.operation }}
+      name: Check if ${{ matrix.operation }} is Changed
+      run: |-
+        echo "skip_current_step=false" >> $GITHUB_ENV
+        if [[ ${changed_operations} == '["ignore"]' ]]; then
+          echo "${current_operation} is ignored by ignore filter"
+          echo "skip_current_step=true" >> $GITHUB_ENV
+        fi
+
+        if [[ ${changed_operations} == *""$current_operation""* ]]; then
+          echo "${current_operation} is detected by changed filter"
+          else
+            echo "${current_operation} is ignore by filter"
+            echo "skip_current_step=true" >> $GITHUB_ENV
+        fi
+    - run: touch optcd-3.txt
+    - name: Checkout Project
+      uses: actions/checkout@v4
+    - run: touch optcd-4.txt
+    - name: Retrieve Maven Caches
+      uses: actions/cache@v4
+      with:
+        path: ~/.m2/repository
+        key: ${{ needs.global-environment.outputs.GLOBAL_CACHE_PREFIX }}-maven-third-party-e2e-cache-${{
+          github.sha }}
+        restore-keys: |-
+          ${{ needs.global-environment.outputs.GLOBAL_CACHE_PREFIX }}-maven-third-party-e2e-cache-
+          ${{ needs.global-environment.outputs.GLOBAL_CACHE_PREFIX }}-maven-third-party-
+    - run: touch optcd-5.txt
+    - uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: 11
+    - run: touch optcd-6.txt
+    - name: Build ${{ matrix.operation }} E2E Image
+      run: ./mvnw -B clean install -am -pl test/e2e/operation/${{ matrix.operation
+        }} -Pit.env.docker -DskipTests
+    - run: touch optcd-7.txt
+    - name: Run ${{ matrix.operation }} on ${{ matrix.image.version }}
+      run: ./mvnw -nsu -B install -f test/e2e/operation/${{ matrix.operation }}/pom.xml
+        -D${{ matrix.operation }}.it.env.type=docker -D${{ matrix.operation }}.${{
+        matrix.image.type }}=${{ matrix.image.version }}
+    - run: touch optcd-8.txt
+    - name: Upload inotifywait logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: inotifywait-e2e-operation (${{ matrix.operation }}, ${{ matrix.image
+          }})
+        path: /home/runner/inotifywait-log-e2e-operation (${{ matrix.operation }},
+          ${{ matrix.image }}).csv
+'on':
+- push
+- workflow_dispatch
